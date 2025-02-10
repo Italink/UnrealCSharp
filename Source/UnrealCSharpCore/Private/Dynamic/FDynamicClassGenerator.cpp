@@ -17,6 +17,8 @@
 #endif
 #include "UEVersion.h"
 #include "CoreMacro/PropertyAttributeMacro.h"
+#include "Engine/InheritableComponentHandler.h"
+#include "Engine/SCS_Node.h"
 
 TSet<UClass::ClassConstructorType> FDynamicClassGenerator::ClassConstructorSet
 {
@@ -627,24 +629,14 @@ void FDynamicClassGenerator::GeneratorProperty(MonoClass* InMonoClass, UClass* I
 		// 	const int32 SecondSortWeight = (InSecond.VersionNumber == SolutionVersion) ? (InSecond.bPreviewRelease? 1 : 2) : 0;
 		// 	return FirstSortWeight >= SecondSortWeight;
 
-		// if (A.bIsRootRootComponent)
-		// {
-		// 	return true;
-		// }
-		//
-		// if (B.bIsRootRootComponent)
-		// {
-		// 	return false;
-		// }
-
 		if (A.bIsRootRootComponent)
 		{
-			return false;
+			return true;
 		}
-
+		
 		if (B.bIsRootRootComponent)
 		{
-			return true;
+			return false;
 		}
 
 		if (A.Socket == B.Property->GetName())
@@ -698,6 +690,87 @@ void FDynamicClassGenerator::GeneratorInterface(MonoClass* InMonoClass, UClass* 
 	}
 }
 
+void UpdateTemplateComponent(USCS_Node* Node, UObject* GeneratedClass, UClass* NewComponentClass, FName NewComponentVariableName)
+{
+	UPackage* TransientPackage = GetTransientPackage();
+	UActorComponent* NewComponentTemplate = NewObject<UActorComponent>(TransientPackage, NewComponentClass, NAME_None, RF_ArchetypeObject | RF_Public);
+
+	FString Name = NewComponentVariableName.ToString() + TEXT("_GEN_VARIABLE");
+	UObject* Collision = FindObject<UObject>(GeneratedClass, *Name);
+	
+	while (Collision)
+	{
+		Collision->Rename(nullptr, TransientPackage, REN_DoNotDirty | REN_DontCreateRedirectors);
+		Collision = FindObject<UObject>(GeneratedClass, *Name);
+	}
+
+	NewComponentTemplate->Rename(*Name, GeneratedClass, REN_DoNotDirty | REN_DontCreateRedirectors);
+	
+	Node->ComponentClass = NewComponentTemplate->GetClass();
+	Node->ComponentTemplate = NewComponentTemplate;
+}
+
+
+FGuid ConstructGUIDFromString(const FString& Name)
+{
+	const uint32 BufferLength = Name.Len() * sizeof(Name[0]);
+	uint32 HashBuffer[5];
+	FSHA1::HashBuffer(*Name, BufferLength, reinterpret_cast<uint8*>(HashBuffer));
+	return FGuid(HashBuffer[1], HashBuffer[2], HashBuffer[3], HashBuffer[4]); 
+}
+
+FGuid ConstructGUIDFromName(const FName& Name)
+{
+	return ConstructGUIDFromString(Name.ToString());
+}
+
+USCS_Node* CreateNode(USimpleConstructionScript* SimpleConstructionScript, UObject* GeneratedClass, UClass* NewComponentClass, FName NewComponentVariableName)
+{
+	USCS_Node* NewNode = NewObject<USCS_Node>(SimpleConstructionScript, MakeUniqueObjectName(SimpleConstructionScript, USCS_Node::StaticClass()));
+	NewNode->SetFlags(RF_Transient);
+	NewNode->SetVariableName(NewComponentVariableName, false);
+	NewNode->VariableGuid = ConstructGUIDFromName(NewComponentVariableName);
+	
+	UpdateTemplateComponent(NewNode, GeneratedClass, NewComponentClass, NewComponentVariableName);
+	
+	SimpleConstructionScript->AddNode(NewNode);
+	return NewNode;
+}
+
+void UpdateChildren(UClass* Outer, USCS_Node* Node)
+{
+	// Unreal's component system doesn't support changing the component class of a node, unless you remove and then re-add the node
+	// This is a workaround to not make the system consider our new template as garbage as it's not yet used in the UInheritableComponentHandler
+#if WITH_EDITOR
+	FComponentKey ComponentKey(Node);
+	TArray<UClass*> ChildClasses;
+	GetDerivedClasses(Outer, ChildClasses);
+
+	for (const UClass* ChildClass : ChildClasses)
+	{
+		const UBlueprint* Blueprint = Cast<UBlueprint>(ChildClass->ClassGeneratedBy);
+
+		if (!IsValid(Blueprint))
+		{
+			continue;
+		}
+
+		UActorComponent* Template = Blueprint->InheritableComponentHandler->GetOverridenComponentTemplate(ComponentKey);
+			
+		if (!IsValid(Template))
+		{
+			continue;
+		}
+		
+		Template->Rename(nullptr, GetTransientPackage(), REN_DoNotDirty | REN_DontCreateRedirectors);
+		Template->ClearFlags(RF_Standalone);
+		Template->RemoveFromRoot();
+		
+		Blueprint->InheritableComponentHandler->RemoveOverridenComponentTemplate(ComponentKey);
+	}
+#endif
+}
+
 void FDynamicClassGenerator::ClassConstructor(const FObjectInitializer& InObjectInitializer)
 {
 	const auto Object = InObjectInitializer.GetObj();
@@ -748,163 +821,97 @@ void FDynamicClassGenerator::ClassConstructor(const FObjectInitializer& InObject
 			{
 				return;
 			}
-			for (auto DefaultSubObject: DefaultSubObjectMap[Class])
+
+			if (IsDynamicBlueprintGeneratedClass(Class))
 			{
-				// if (DefaultSubObject.bIsRootRootComponent)
+				auto Outer = Class;
+				
+				auto BPClass = Cast<UBlueprintGeneratedClass>(Class);
+
+				TObjectPtr<USimpleConstructionScript> SimpleConstructionScript = BPClass->SimpleConstructionScript;
+
+				struct FCSAttachmentNode
 				{
-					auto Actor = Cast<AActor>(InObjectInitializer.GetObj());
-		
-					const FObjectProperty* ObjectProperty = DefaultSubObject.Property;
-
-					// bIsTransient
-					UObject* NewSubObject = InObjectInitializer.CreateDefaultSubobject(
-						Actor, ObjectProperty->GetFName(), ObjectProperty->PropertyClass, ObjectProperty->PropertyClass, true,
-						false);
-		
-					ObjectProperty->SetObjectPropertyValue_InContainer(Actor, NewSubObject);
-				}
-			}
-			
-			for (auto DefaultSubObject: DefaultSubObjectMap[Class])
-			{
-				// if (DefaultSubObject.bIsRootRootComponent)
+					USCS_Node* Node;
+					FName AttachToComponentName;
+				};
+				
+				USimpleConstructionScript* CurrentSCS = SimpleConstructionScript;
+				TArray<FCSAttachmentNode> AttachmentNodes;
+				
+				for (auto DefaultSubObject: DefaultSubObjectMap[Class])
 				{
-					auto Actor = Cast<AActor>(InObjectInitializer.GetObj());
-		
-					const FObjectProperty* ObjectProperty = DefaultSubObject.Property;
-
-					// bIsTransient
-					// UObject* NewSubObject = InObjectInitializer.CreateDefaultSubobject(
-					// 	Actor, ObjectProperty->GetFName(), ObjectProperty->PropertyClass, ObjectProperty->PropertyClass, true,
-					// 	false);
-					//
-					// ObjectProperty->SetObjectPropertyValue_InContainer(Actor, NewSubObject);
-
-					USceneComponent* SceneComponent = Cast<USceneComponent>(ObjectProperty->GetObjectPropertyValue_InContainer(Actor));
-
-					Actor->AddInstanceComponent(SceneComponent);
-					
-					if (SceneComponent != nullptr)
+					if (!IsValid(CurrentSCS))
 					{
-						if (DefaultSubObject.bIsRootRootComponent)
+						CurrentSCS = NewObject<USimpleConstructionScript>(Outer, NAME_None, RF_Transient);
+						// @TODO
+						SimpleConstructionScript = CurrentSCS;
+
+						BPClass->SimpleConstructionScript = CurrentSCS;
+					}
+				
+					UClass* Class1 = DefaultSubObject.Property->PropertyClass;
+
+					USCS_Node* Node = CurrentSCS->FindSCSNode(*DefaultSubObject.Property->GetName());
+				
+					if (!Node)
+					{
+						Node = CreateNode(CurrentSCS, Outer, Class1, *DefaultSubObject.Property->GetName());
+					}
+					else if (Class1 != Node->ComponentClass)
+					{
+						UpdateChildren(Outer, Node);
+						UpdateTemplateComponent(Node, Outer, Class1, *DefaultSubObject.Property->GetName());
+					}
+				
+					FName AttachToComponentName = DefaultSubObject.Parent.IsEmpty() ? NAME_None : FName(*DefaultSubObject.Parent);
+					
+					bool HasValidAttachment = AttachToComponentName != NAME_None;
+				
+					Node->AttachToName = HasValidAttachment ? FName(*DefaultSubObject.Socket) : NAME_None;
+
+					if (HasValidAttachment)
+					{
+						FCSAttachmentNode AttachmentNode;
+						AttachmentNode.Node = Node;
+						AttachmentNode.AttachToComponentName = AttachToComponentName;
+						AttachmentNodes.Add(AttachmentNode);
+					}
+				}
+
+				for (const FCSAttachmentNode& AttachmentNode : AttachmentNodes)
+				{
+					FName AttachToComponentName = AttachmentNode.AttachToComponentName;
+					USCS_Node* Node = AttachmentNode.Node;
+					USCS_Node* ParentNode = CurrentSCS->FindSCSNode(AttachToComponentName);
+
+					if (!ParentNode)
+					{
+						ParentNode = CurrentSCS->GetRootNodes()[0];
+					}
+					
+					if (ParentNode->ChildNodes.Contains(Node))
+					{
+						return;
+					}
+
+					ParentNode->AddChildNode(Node);
+					
+					Node->bIsParentComponentNative = false;
+					Node->ParentComponentOrVariableName = AttachToComponentName;
+					Node->ParentComponentOwnerClassName = SimpleConstructionScript->GetFName();
+					
+					for (USCS_Node* NodeItr : CurrentSCS->GetAllNodes())
+					{
+						if (NodeItr != Node && NodeItr->ChildNodes.Contains(Node) && NodeItr->GetVariableName() != AttachToComponentName)
 						{
-							Actor->SetRootComponent(SceneComponent);
-
-							continue;
-						}
-
-						USceneComponent* Parent{};
-
-						FName SocketName = NAME_None;
-
-						if (!DefaultSubObject.Parent.IsEmpty())
-						{
-							if (FObjectProperty* ParentObjectProperty = FindFProperty<FObjectProperty>(
-				Actor->GetClass(), *DefaultSubObject.Parent, EFieldIterationFlags::IncludeSuper))
-							{
-								Parent = Cast<USceneComponent>(
-									ParentObjectProperty->GetObjectPropertyValue_InContainer(Actor));
-
-								// SceneComponent->SetupAttachment(AttachmentComponent, *DefaultSubObject.Socket);
-
-								SocketName = *DefaultSubObject.Socket;
-
-								// UObject* Archetype = Actor->GetArchetype();
-								// USceneComponent* Template = Cast<USceneComponent>(
-								// 	Archetype->GetDefaultSubobjectByName(DefaultSubObject.Property->GetFName()));
-								// USceneComponent* TemplateAttachmentComponent = Cast<USceneComponent>(
-								// 	Archetype->GetDefaultSubobjectByName(*DefaultSubObject.Parent));
-								//
-								// if (IsValid(Template) && IsValid(TemplateAttachmentComponent) && Template->GetAttachParent() !=
-								// 	TemplateAttachmentComponent)
-								// {
-								// 	Template->SetupAttachment(TemplateAttachmentComponent, *DefaultSubObject.Socket);
-								// }
-							}
-						}
-						else
-						{
-							Parent = Actor->GetRootComponent();
-						}
-
-						if (Parent != nullptr)
-						{
-							SceneComponent->SetupAttachment(Parent, SocketName);
+							// The attachment has changed, remove the node from the old parent
+							NodeItr->RemoveChildNode(Node, false);
+							break;
 						}
 					}
 				}
 			}
-
-			auto Actor = Cast<AActor>(InObjectInitializer.GetObj());
-
-			// Actor->ResetOwnedComponents();
-			
-			
-			// for (auto DefaultSubObject: DefaultSubObjectMap[Class])
-			// {
-			// 	// if (DefaultSubObject.bIsRootRootComponent)
-			// 	{
-			// 		auto Actor = Cast<AActor>(InObjectInitializer.GetObj());
-			//
-			// 		const FObjectProperty* ObjectProperty = DefaultSubObject.Property;
-			//
-			// 		// bIsTransient
-			// 		UObject* NewSubObject = InObjectInitializer.CreateDefaultSubobject(
-			// 			Actor, ObjectProperty->GetFName(), ObjectProperty->PropertyClass, ObjectProperty->PropertyClass, true,
-			// 			false);
-			//
-			// 		ObjectProperty->SetObjectPropertyValue_InContainer(Actor, NewSubObject);
-			//
-			// 		if (const auto SceneComponent = Cast<USceneComponent>(NewSubObject))
-			// 		{
-			// 			if (DefaultSubObject.bIsRootRootComponent)
-			// 			{
-			// 				Actor->SetRootComponent(SceneComponent);
-			//
-			// 				continue;
-			// 			}
-			//
-			// 			USceneComponent* Parent{};
-			//
-			// 			FName SocketName = NAME_None;
-			//
-			// 			if (!DefaultSubObject.Parent.IsEmpty())
-			// 			{
-			// 				if (FObjectProperty* ParentObjectProperty = FindFProperty<FObjectProperty>(
-			// 	Actor->GetClass(), *DefaultSubObject.Parent, EFieldIterationFlags::IncludeSuper))
-			// 				{
-			// 					Parent = Cast<USceneComponent>(
-			// 						ParentObjectProperty->GetObjectPropertyValue_InContainer(Actor));
-			//
-			// 					// SceneComponent->SetupAttachment(AttachmentComponent, *DefaultSubObject.Socket);
-			//
-			// 					SocketName = *DefaultSubObject.Socket;
-			//
-			// 					// UObject* Archetype = Actor->GetArchetype();
-			// 					// USceneComponent* Template = Cast<USceneComponent>(
-			// 					// 	Archetype->GetDefaultSubobjectByName(DefaultSubObject.Property->GetFName()));
-			// 					// USceneComponent* TemplateAttachmentComponent = Cast<USceneComponent>(
-			// 					// 	Archetype->GetDefaultSubobjectByName(*DefaultSubObject.Parent));
-			// 					//
-			// 					// if (IsValid(Template) && IsValid(TemplateAttachmentComponent) && Template->GetAttachParent() !=
-			// 					// 	TemplateAttachmentComponent)
-			// 					// {
-			// 					// 	Template->SetupAttachment(TemplateAttachmentComponent, *DefaultSubObject.Socket);
-			// 					// }
-			// 				}
-			// 			}
-			// 			else
-			// 			{
-			// 				Parent = Actor->GetRootComponent();
-			// 			}
-			//
-			// 			if (Parent != nullptr)
-			// 			{
-			// 				SceneComponent->SetupAttachment(Parent, SocketName);
-			// 			}
-			// 		}
-			// 	}
-			// }
 		}
 	}
 }

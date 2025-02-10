@@ -1256,7 +1256,7 @@ FString FDynamicGeneratorCore::AttrGetValue(MonoCustomAttrInfo* InMonoCustomAttr
 }
 
 void FDynamicGeneratorCore::GeneratorProperty(MonoClass* InMonoClass, UField* InField,
-                                              const TFunction<void(const FProperty* InProperty)>& InGenerator)
+                                              const TFunction<void(const MonoProperty*, MonoCustomAttrInfo*, const FProperty*)>& InGenerator)
 {
 	if (InMonoClass == nullptr || InField == nullptr)
 	{
@@ -1287,7 +1287,7 @@ void FDynamicGeneratorCore::GeneratorProperty(MonoClass* InMonoClass, UField* In
 
 				InField->AddCppProperty(CppProperty);
 
-				InGenerator(CppProperty);
+				InGenerator(Property, Attrs, CppProperty);
 			}
 		}
 	}

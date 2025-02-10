@@ -16,6 +16,7 @@
 #include "Delegate/FUnrealCSharpCoreModuleDelegates.h"
 #endif
 #include "UEVersion.h"
+#include "CoreMacro/PropertyAttributeMacro.h"
 
 TSet<UClass::ClassConstructorType> FDynamicClassGenerator::ClassConstructorSet
 {
@@ -23,6 +24,8 @@ TSet<UClass::ClassConstructorType> FDynamicClassGenerator::ClassConstructorSet
 };
 
 TMap<UClass*, FString> FDynamicClassGenerator::NamespaceMap;
+
+TMap<UClass*,TArray<FDynamicClassGenerator::FDefaultSubObject>> FDynamicClassGenerator::DefaultSubObjectMap;
 
 TMap<FString, UClass*> FDynamicClassGenerator::DynamicClassMap;
 
@@ -545,8 +548,10 @@ void FDynamicClassGenerator::ReInstance(UClass* InOldClass, UClass* InNewClass)
 
 void FDynamicClassGenerator::GeneratorProperty(MonoClass* InMonoClass, UClass* InClass)
 {
+	DefaultSubObjectMap.Add(InClass, {});
+	
 	FDynamicGeneratorCore::GeneratorProperty(InMonoClass, InClass,
-	                                         [InClass](const FProperty* InProperty)
+	                                         [InClass](const MonoProperty* InMonoProperty, MonoCustomAttrInfo* InMonoCustomAttrInfo, const FProperty* InProperty)
 	                                         {
 		                                         if (InProperty->HasAnyPropertyFlags(CPF_Net))
 		                                         {
@@ -582,8 +587,78 @@ void FDynamicClassGenerator::GeneratorProperty(MonoClass* InMonoClass, UClass* I
 				                                         Blueprint->NewVariables.Add(BPVariableDescription);
 			                                         }
 		                                         }
+
 #endif
+	                                         	
+												 if (FDynamicGeneratorCore::AttrsHasAttr(InMonoCustomAttrInfo, CLASS_DEFAULT_SUB_OBJECT_ATTRIBUTE))
+												 {
+												 	FDefaultSubObject DefaultSubObject;
+
+												 	DefaultSubObject.Property = CastField<FObjectProperty>(InProperty);
+
+												 	if (FDynamicGeneratorCore::AttrsHasAttr(InMonoCustomAttrInfo, CLASS_ROOT_COMPONENT_ATTRIBUTE))
+												 	{
+												 		DefaultSubObject.bIsRootRootComponent = true;
+												 	}
+
+												    DefaultSubObject.Parent = FDynamicGeneratorCore::AttrsHasAttr(
+													                              InMonoCustomAttrInfo,
+													                              CLASS_ATTACHMENT_PARENT_ATTRIBUTE)
+													                              ? FDynamicGeneratorCore::AttrGetValue(
+														                              InMonoCustomAttrInfo,
+														                              CLASS_ATTACHMENT_PARENT_ATTRIBUTE)
+													                              : FString{};
+
+												 	DefaultSubObject.Socket = FDynamicGeneratorCore::AttrsHasAttr(
+																				  InMonoCustomAttrInfo,
+																				  CLASS_ATTACHMENT_SOCKET_NAME_ATTRIBUTE)
+																				  ? FDynamicGeneratorCore::AttrGetValue(
+																					  InMonoCustomAttrInfo,
+																					  CLASS_ATTACHMENT_SOCKET_NAME_ATTRIBUTE)
+																				  : FString{};
+												 	
+												 	DefaultSubObjectMap[InClass].Add(DefaultSubObject);
+												 }
 	                                         });
+
+	DefaultSubObjectMap[InClass].StableSort([](const FDefaultSubObject& A, const FDefaultSubObject& B)
+	{
+		// const int32 FirstSortWeight = (InFirst.VersionNumber == SolutionVersion) ? (InFirst.bPreviewRelease? 1 : 2) : 0;
+		// 	const int32 SecondSortWeight = (InSecond.VersionNumber == SolutionVersion) ? (InSecond.bPreviewRelease? 1 : 2) : 0;
+		// 	return FirstSortWeight >= SecondSortWeight;
+
+		// if (A.bIsRootRootComponent)
+		// {
+		// 	return true;
+		// }
+		//
+		// if (B.bIsRootRootComponent)
+		// {
+		// 	return false;
+		// }
+
+		if (A.bIsRootRootComponent)
+		{
+			return false;
+		}
+
+		if (B.bIsRootRootComponent)
+		{
+			return true;
+		}
+
+		if (A.Socket == B.Property->GetName())
+		{
+			return true;
+		}
+
+		if (A.Property->GetName() == B.Socket)
+		{
+			return false;
+		}
+
+		return true;
+	});
 }
 
 void FDynamicClassGenerator::GeneratorFunction(MonoClass* InMonoClass, UClass* InClass)
@@ -627,34 +702,210 @@ void FDynamicClassGenerator::ClassConstructor(const FObjectInitializer& InObject
 {
 	const auto Object = InObjectInitializer.GetObj();
 
-	auto SuperClass = InObjectInitializer.GetClass();
+	auto Class = InObjectInitializer.GetClass();
 
-	while (SuperClass != nullptr)
+	while (Class != nullptr)
 	{
-		if (IsDynamicClass(SuperClass))
+		if (IsDynamicClass(Class))
 		{
-			for (TFieldIterator<FProperty> It(SuperClass, EFieldIteratorFlags::ExcludeSuper,
-			                                  EFieldIteratorFlags::ExcludeDeprecated); It; ++It)
+			for (TFieldIterator<FProperty> It(Class, EFieldIteratorFlags::ExcludeSuper,
+											  EFieldIteratorFlags::ExcludeDeprecated); It; ++It)
 			{
 				It->InitializeValue(It->ContainerPtrToValuePtr<void>(Object));
 			}
 		}
 
-		SuperClass = SuperClass->GetSuperClass();
+		Class = Class->GetSuperClass();
 	}
 
-	SuperClass = InObjectInitializer.GetClass();
+	Class = InObjectInitializer.GetClass();
 
-	while (SuperClass != nullptr)
+	while (Class != nullptr)
 	{
-		if (SuperClass->ClassConstructor != nullptr && !ClassConstructorSet.Contains(SuperClass->ClassConstructor))
+		if (Class->ClassConstructor != nullptr && !ClassConstructorSet.Contains(Class->ClassConstructor))
 		{
-			SuperClass->ClassConstructor(InObjectInitializer);
+			Class->ClassConstructor(InObjectInitializer);
 
 			break;
 		}
 
-		SuperClass = SuperClass->GetSuperClass();
+		Class = Class->GetSuperClass();
+	}
+
+	Class = InObjectInitializer.GetClass();
+
+	if (Class->IsChildOf(AActor::StaticClass()))
+	{
+		if (DefaultSubObjectMap.Contains(Class))
+		{
+			if (!DefaultSubObjectMap[Class].IsEmpty())
+			{
+				auto x1 = DefaultSubObjectMap[Class];
+
+				auto x2 = 0;
+			}
+			else
+			{
+				return;
+			}
+			for (auto DefaultSubObject: DefaultSubObjectMap[Class])
+			{
+				// if (DefaultSubObject.bIsRootRootComponent)
+				{
+					auto Actor = Cast<AActor>(InObjectInitializer.GetObj());
+		
+					const FObjectProperty* ObjectProperty = DefaultSubObject.Property;
+
+					// bIsTransient
+					UObject* NewSubObject = InObjectInitializer.CreateDefaultSubobject(
+						Actor, ObjectProperty->GetFName(), ObjectProperty->PropertyClass, ObjectProperty->PropertyClass, true,
+						false);
+		
+					ObjectProperty->SetObjectPropertyValue_InContainer(Actor, NewSubObject);
+				}
+			}
+			
+			for (auto DefaultSubObject: DefaultSubObjectMap[Class])
+			{
+				// if (DefaultSubObject.bIsRootRootComponent)
+				{
+					auto Actor = Cast<AActor>(InObjectInitializer.GetObj());
+		
+					const FObjectProperty* ObjectProperty = DefaultSubObject.Property;
+
+					// bIsTransient
+					// UObject* NewSubObject = InObjectInitializer.CreateDefaultSubobject(
+					// 	Actor, ObjectProperty->GetFName(), ObjectProperty->PropertyClass, ObjectProperty->PropertyClass, true,
+					// 	false);
+					//
+					// ObjectProperty->SetObjectPropertyValue_InContainer(Actor, NewSubObject);
+
+					USceneComponent* SceneComponent = Cast<USceneComponent>(ObjectProperty->GetObjectPropertyValue_InContainer(Actor));
+
+					Actor->AddInstanceComponent(SceneComponent);
+					
+					if (SceneComponent != nullptr)
+					{
+						if (DefaultSubObject.bIsRootRootComponent)
+						{
+							Actor->SetRootComponent(SceneComponent);
+
+							continue;
+						}
+
+						USceneComponent* Parent{};
+
+						FName SocketName = NAME_None;
+
+						if (!DefaultSubObject.Parent.IsEmpty())
+						{
+							if (FObjectProperty* ParentObjectProperty = FindFProperty<FObjectProperty>(
+				Actor->GetClass(), *DefaultSubObject.Parent, EFieldIterationFlags::IncludeSuper))
+							{
+								Parent = Cast<USceneComponent>(
+									ParentObjectProperty->GetObjectPropertyValue_InContainer(Actor));
+
+								// SceneComponent->SetupAttachment(AttachmentComponent, *DefaultSubObject.Socket);
+
+								SocketName = *DefaultSubObject.Socket;
+
+								// UObject* Archetype = Actor->GetArchetype();
+								// USceneComponent* Template = Cast<USceneComponent>(
+								// 	Archetype->GetDefaultSubobjectByName(DefaultSubObject.Property->GetFName()));
+								// USceneComponent* TemplateAttachmentComponent = Cast<USceneComponent>(
+								// 	Archetype->GetDefaultSubobjectByName(*DefaultSubObject.Parent));
+								//
+								// if (IsValid(Template) && IsValid(TemplateAttachmentComponent) && Template->GetAttachParent() !=
+								// 	TemplateAttachmentComponent)
+								// {
+								// 	Template->SetupAttachment(TemplateAttachmentComponent, *DefaultSubObject.Socket);
+								// }
+							}
+						}
+						else
+						{
+							Parent = Actor->GetRootComponent();
+						}
+
+						if (Parent != nullptr)
+						{
+							SceneComponent->SetupAttachment(Parent, SocketName);
+						}
+					}
+				}
+			}
+
+			auto Actor = Cast<AActor>(InObjectInitializer.GetObj());
+
+			// Actor->ResetOwnedComponents();
+			
+			
+			// for (auto DefaultSubObject: DefaultSubObjectMap[Class])
+			// {
+			// 	// if (DefaultSubObject.bIsRootRootComponent)
+			// 	{
+			// 		auto Actor = Cast<AActor>(InObjectInitializer.GetObj());
+			//
+			// 		const FObjectProperty* ObjectProperty = DefaultSubObject.Property;
+			//
+			// 		// bIsTransient
+			// 		UObject* NewSubObject = InObjectInitializer.CreateDefaultSubobject(
+			// 			Actor, ObjectProperty->GetFName(), ObjectProperty->PropertyClass, ObjectProperty->PropertyClass, true,
+			// 			false);
+			//
+			// 		ObjectProperty->SetObjectPropertyValue_InContainer(Actor, NewSubObject);
+			//
+			// 		if (const auto SceneComponent = Cast<USceneComponent>(NewSubObject))
+			// 		{
+			// 			if (DefaultSubObject.bIsRootRootComponent)
+			// 			{
+			// 				Actor->SetRootComponent(SceneComponent);
+			//
+			// 				continue;
+			// 			}
+			//
+			// 			USceneComponent* Parent{};
+			//
+			// 			FName SocketName = NAME_None;
+			//
+			// 			if (!DefaultSubObject.Parent.IsEmpty())
+			// 			{
+			// 				if (FObjectProperty* ParentObjectProperty = FindFProperty<FObjectProperty>(
+			// 	Actor->GetClass(), *DefaultSubObject.Parent, EFieldIterationFlags::IncludeSuper))
+			// 				{
+			// 					Parent = Cast<USceneComponent>(
+			// 						ParentObjectProperty->GetObjectPropertyValue_InContainer(Actor));
+			//
+			// 					// SceneComponent->SetupAttachment(AttachmentComponent, *DefaultSubObject.Socket);
+			//
+			// 					SocketName = *DefaultSubObject.Socket;
+			//
+			// 					// UObject* Archetype = Actor->GetArchetype();
+			// 					// USceneComponent* Template = Cast<USceneComponent>(
+			// 					// 	Archetype->GetDefaultSubobjectByName(DefaultSubObject.Property->GetFName()));
+			// 					// USceneComponent* TemplateAttachmentComponent = Cast<USceneComponent>(
+			// 					// 	Archetype->GetDefaultSubobjectByName(*DefaultSubObject.Parent));
+			// 					//
+			// 					// if (IsValid(Template) && IsValid(TemplateAttachmentComponent) && Template->GetAttachParent() !=
+			// 					// 	TemplateAttachmentComponent)
+			// 					// {
+			// 					// 	Template->SetupAttachment(TemplateAttachmentComponent, *DefaultSubObject.Socket);
+			// 					// }
+			// 				}
+			// 			}
+			// 			else
+			// 			{
+			// 				Parent = Actor->GetRootComponent();
+			// 			}
+			//
+			// 			if (Parent != nullptr)
+			// 			{
+			// 				SceneComponent->SetupAttachment(Parent, SocketName);
+			// 			}
+			// 		}
+			// 	}
+			// }
+		}
 	}
 }
 

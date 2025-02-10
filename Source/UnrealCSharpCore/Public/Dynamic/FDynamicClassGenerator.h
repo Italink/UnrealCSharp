@@ -93,8 +93,21 @@ private:
 public:
 	static UNREALCSHARPCORE_API TSet<UClass::ClassConstructorType> ClassConstructorSet;
 
+public:
+	struct FDefaultSubObject
+	{
+		const FObjectProperty* Property;
+
+		bool bIsRootRootComponent = false;
+
+		FString Parent;
+
+		FString Socket;
+	};
 private:
 	static TMap<UClass*, FString> NamespaceMap;
+
+	static TMap<UClass*,TArray<FDefaultSubObject>> DefaultSubObjectMap;
 
 	static TMap<FString, UClass*> DynamicClassMap;
 

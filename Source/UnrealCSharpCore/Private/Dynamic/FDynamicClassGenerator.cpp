@@ -550,8 +550,6 @@ void FDynamicClassGenerator::ReInstance(UClass* InOldClass, UClass* InNewClass)
 
 void FDynamicClassGenerator::GeneratorProperty(MonoClass* InMonoClass, UClass* InClass)
 {
-	DefaultSubObjectMap.Add(InClass, {});
-	
 	FDynamicGeneratorCore::GeneratorProperty(InMonoClass, InClass,
 	                                         [InClass](const MonoProperty* InMonoProperty, MonoCustomAttrInfo* InMonoCustomAttrInfo, const FProperty* InProperty)
 	                                         {
@@ -591,66 +589,51 @@ void FDynamicClassGenerator::GeneratorProperty(MonoClass* InMonoClass, UClass* I
 		                                         }
 
 #endif
-	                                         	
-												 if (FDynamicGeneratorCore::AttrsHasAttr(InMonoCustomAttrInfo, CLASS_DEFAULT_SUB_OBJECT_ATTRIBUTE))
-												 {
-												 	FDefaultSubObject DefaultSubObject;
 
-												 	DefaultSubObject.Property = CastField<FObjectProperty>(InProperty);
+	                                         	if (IsDynamicBlueprintGeneratedClass(InClass))
+	                                         	{
+	                                         		if (FDynamicGeneratorCore::AttrsHasAttr(InMonoCustomAttrInfo, CLASS_DEFAULT_SUB_OBJECT_ATTRIBUTE))
+	                                         		{
+														 FDefaultSubObject DefaultSubObject;
 
-												 	if (FDynamicGeneratorCore::AttrsHasAttr(InMonoCustomAttrInfo, CLASS_ROOT_COMPONENT_ATTRIBUTE))
-												 	{
-												 		DefaultSubObject.bIsRootRootComponent = true;
-												 	}
+														 DefaultSubObject.Property = CastField<FObjectProperty>(InProperty);
 
-												    DefaultSubObject.Parent = FDynamicGeneratorCore::AttrsHasAttr(
-													                              InMonoCustomAttrInfo,
-													                              CLASS_ATTACHMENT_PARENT_ATTRIBUTE)
-													                              ? FDynamicGeneratorCore::AttrGetValue(
-														                              InMonoCustomAttrInfo,
-														                              CLASS_ATTACHMENT_PARENT_ATTRIBUTE)
-													                              : FString{};
+														 if (FDynamicGeneratorCore::AttrsHasAttr(InMonoCustomAttrInfo, CLASS_ROOT_COMPONENT_ATTRIBUTE))
+														 {
+															 DefaultSubObject.bIsRootComponent = true;
+														 }
 
-												 	DefaultSubObject.Socket = FDynamicGeneratorCore::AttrsHasAttr(
-																				  InMonoCustomAttrInfo,
-																				  CLASS_ATTACHMENT_SOCKET_NAME_ATTRIBUTE)
-																				  ? FDynamicGeneratorCore::AttrGetValue(
-																					  InMonoCustomAttrInfo,
-																					  CLASS_ATTACHMENT_SOCKET_NAME_ATTRIBUTE)
-																				  : FString{};
+														 DefaultSubObject.Parent = FDynamicGeneratorCore::AttrsHasAttr(
+																 InMonoCustomAttrInfo,
+																 CLASS_ATTACHMENT_PARENT_ATTRIBUTE)
+																 ? FDynamicGeneratorCore::AttrGetValue(
+																	 InMonoCustomAttrInfo,
+																	 CLASS_ATTACHMENT_PARENT_ATTRIBUTE)
+																 : FString{};
+
+														 DefaultSubObject.Socket = FDynamicGeneratorCore::AttrsHasAttr(
+																 InMonoCustomAttrInfo,
+																 CLASS_ATTACHMENT_SOCKET_NAME_ATTRIBUTE)
+																 ? FDynamicGeneratorCore::AttrGetValue(
+																	 InMonoCustomAttrInfo,
+																	 CLASS_ATTACHMENT_SOCKET_NAME_ATTRIBUTE)
+																 : FString{};
 												 	
-												 	DefaultSubObjectMap[InClass].Add(DefaultSubObject);
-												 }
+														 DefaultSubObjectMap.FindOrAdd(InClass).Add(DefaultSubObject);
+													 }
+	                                         	}
 	                                         });
 
-	DefaultSubObjectMap[InClass].StableSort([](const FDefaultSubObject& A, const FDefaultSubObject& B)
+	if (IsDynamicBlueprintGeneratedClass(InClass))
 	{
-		// const int32 FirstSortWeight = (InFirst.VersionNumber == SolutionVersion) ? (InFirst.bPreviewRelease? 1 : 2) : 0;
-		// 	const int32 SecondSortWeight = (InSecond.VersionNumber == SolutionVersion) ? (InSecond.bPreviewRelease? 1 : 2) : 0;
-		// 	return FirstSortWeight >= SecondSortWeight;
-
-		if (A.bIsRootRootComponent)
+		if (DefaultSubObjectMap.Contains(InClass))
 		{
-			return true;
+			DefaultSubObjectMap[InClass].StableSort([](const FDefaultSubObject& A, const FDefaultSubObject& B)
+			{
+				return A.bIsRootComponent;
+			});
 		}
-		
-		if (B.bIsRootRootComponent)
-		{
-			return false;
-		}
-
-		if (A.Socket == B.Property->GetName())
-		{
-			return true;
-		}
-
-		if (A.Property->GetName() == B.Socket)
-		{
-			return false;
-		}
-
-		return true;
-	});
+	}
 }
 
 void FDynamicClassGenerator::GeneratorFunction(MonoClass* InMonoClass, UClass* InClass)
@@ -711,25 +694,12 @@ void UpdateTemplateComponent(USCS_Node* Node, UObject* GeneratedClass, UClass* N
 }
 
 
-FGuid ConstructGUIDFromString(const FString& Name)
-{
-	const uint32 BufferLength = Name.Len() * sizeof(Name[0]);
-	uint32 HashBuffer[5];
-	FSHA1::HashBuffer(*Name, BufferLength, reinterpret_cast<uint8*>(HashBuffer));
-	return FGuid(HashBuffer[1], HashBuffer[2], HashBuffer[3], HashBuffer[4]); 
-}
-
-FGuid ConstructGUIDFromName(const FName& Name)
-{
-	return ConstructGUIDFromString(Name.ToString());
-}
-
 USCS_Node* CreateNode(USimpleConstructionScript* SimpleConstructionScript, UObject* GeneratedClass, UClass* NewComponentClass, FName NewComponentVariableName)
 {
 	USCS_Node* NewNode = NewObject<USCS_Node>(SimpleConstructionScript, MakeUniqueObjectName(SimpleConstructionScript, USCS_Node::StaticClass()));
 	NewNode->SetFlags(RF_Transient);
 	NewNode->SetVariableName(NewComponentVariableName, false);
-	NewNode->VariableGuid = ConstructGUIDFromName(NewComponentVariableName);
+	NewNode->VariableGuid = FGuid::NewGuid();
 	
 	UpdateTemplateComponent(NewNode, GeneratedClass, NewComponentClass, NewComponentVariableName);
 	
@@ -811,57 +781,39 @@ void FDynamicClassGenerator::ClassConstructor(const FObjectInitializer& InObject
 	{
 		if (DefaultSubObjectMap.Contains(Class))
 		{
-			if (!DefaultSubObjectMap[Class].IsEmpty())
-			{
-				auto x1 = DefaultSubObjectMap[Class];
-
-				auto x2 = 0;
-			}
-			else
-			{
-				return;
-			}
-
 			if (IsDynamicBlueprintGeneratedClass(Class))
 			{
-				auto Outer = Class;
-				
-				auto BPClass = Cast<UBlueprintGeneratedClass>(Class);
-
-				TObjectPtr<USimpleConstructionScript> SimpleConstructionScript = BPClass->SimpleConstructionScript;
-
 				struct FCSAttachmentNode
 				{
 					USCS_Node* Node;
 					FName AttachToComponentName;
 				};
 				
-				USimpleConstructionScript* CurrentSCS = SimpleConstructionScript;
+				USimpleConstructionScript* SimpleConstructionScript = Cast<UBlueprintGeneratedClass>(Class)->SimpleConstructionScript;
+				
 				TArray<FCSAttachmentNode> AttachmentNodes;
 				
 				for (auto DefaultSubObject: DefaultSubObjectMap[Class])
 				{
-					if (!IsValid(CurrentSCS))
+					if (!IsValid(SimpleConstructionScript))
 					{
-						CurrentSCS = NewObject<USimpleConstructionScript>(Outer, NAME_None, RF_Transient);
-						// @TODO
-						SimpleConstructionScript = CurrentSCS;
+						SimpleConstructionScript = NewObject<USimpleConstructionScript>(Class, NAME_None, RF_Transient);
 
-						BPClass->SimpleConstructionScript = CurrentSCS;
+						Cast<UBlueprintGeneratedClass>(Class)->SimpleConstructionScript = SimpleConstructionScript;
 					}
 				
-					UClass* Class1 = DefaultSubObject.Property->PropertyClass;
+					UClass* PropertyClass = DefaultSubObject.Property->PropertyClass;
 
-					USCS_Node* Node = CurrentSCS->FindSCSNode(*DefaultSubObject.Property->GetName());
+					USCS_Node* Node = SimpleConstructionScript->FindSCSNode(*DefaultSubObject.Property->GetName());
 				
 					if (!Node)
 					{
-						Node = CreateNode(CurrentSCS, Outer, Class1, *DefaultSubObject.Property->GetName());
+						Node = CreateNode(SimpleConstructionScript, Class, PropertyClass, *DefaultSubObject.Property->GetName());
 					}
-					else if (Class1 != Node->ComponentClass)
+					else if (PropertyClass != Node->ComponentClass)
 					{
-						UpdateChildren(Outer, Node);
-						UpdateTemplateComponent(Node, Outer, Class1, *DefaultSubObject.Property->GetName());
+						UpdateChildren(Class, Node);
+						UpdateTemplateComponent(Node, Class, PropertyClass, *DefaultSubObject.Property->GetName());
 					}
 				
 					FName AttachToComponentName = DefaultSubObject.Parent.IsEmpty() ? NAME_None : FName(*DefaultSubObject.Parent);
@@ -883,11 +835,11 @@ void FDynamicClassGenerator::ClassConstructor(const FObjectInitializer& InObject
 				{
 					FName AttachToComponentName = AttachmentNode.AttachToComponentName;
 					USCS_Node* Node = AttachmentNode.Node;
-					USCS_Node* ParentNode = CurrentSCS->FindSCSNode(AttachToComponentName);
+					USCS_Node* ParentNode = SimpleConstructionScript->FindSCSNode(AttachToComponentName);
 
 					if (!ParentNode)
 					{
-						ParentNode = CurrentSCS->GetRootNodes()[0];
+						ParentNode = SimpleConstructionScript->GetRootNodes()[0];
 					}
 					
 					if (ParentNode->ChildNodes.Contains(Node))
@@ -899,9 +851,9 @@ void FDynamicClassGenerator::ClassConstructor(const FObjectInitializer& InObject
 					
 					Node->bIsParentComponentNative = false;
 					Node->ParentComponentOrVariableName = AttachToComponentName;
-					Node->ParentComponentOwnerClassName = SimpleConstructionScript->GetFName();
+					Node->ParentComponentOwnerClassName = Cast<UBlueprintGeneratedClass>(Class)->SimpleConstructionScript->GetFName();
 					
-					for (USCS_Node* NodeItr : CurrentSCS->GetAllNodes())
+					for (USCS_Node* NodeItr : SimpleConstructionScript->GetAllNodes())
 					{
 						if (NodeItr != Node && NodeItr->ChildNodes.Contains(Node) && NodeItr->GetVariableName() != AttachToComponentName)
 						{

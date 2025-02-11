@@ -98,7 +98,7 @@ public:
 	{
 		const FObjectProperty* Property;
 
-		bool bIsRootRootComponent = false;
+		bool bIsRootComponent = false;
 
 		FString Parent;
 

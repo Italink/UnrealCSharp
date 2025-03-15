@@ -58,5 +58,5 @@ private:
 
 	bool bIsStopped;
 
-	TSharedPtr<SNotificationItem> NotificationItem;
+	static TSharedPtr<SNotificationItem> CompileStateNotification;
 };
